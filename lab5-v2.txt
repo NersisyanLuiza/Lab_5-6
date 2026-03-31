@@ -1,0 +1,171 @@
+#include <iostream>
+#include <fstream>
+#include <string>
+#include <vector>
+#include <filesystem>
+#include <windows.h>
+#include <algorithm>
+
+using namespace std;
+namespace fs = std::filesystem;
+
+// =========================================================
+// 1. Encryption Engine (Գաղտնագրման շարժիչ)
+// =========================================================
+class EncryptionEngine {
+public:
+    // Ֆայլերի գաղտնագրում/վերծանում (XOR Block Mode)
+    static bool processFile(const fs::path& filePath, const string& key, bool encrypt) {
+        try {
+            ifstream inFile(filePath, ios::binary);
+            if (!inFile) return false;
+
+            // Կարդում ենք ֆայլի բովանդակությունը
+            vector<char> buffer((istreambuf_iterator<char>(inFile)), istreambuf_iterator<char>());
+            inFile.close();
+
+            // XOR Գաղտնագրման ալգորիթմ (Stream/Block mode մոտեցմամբ)
+            for (size_t i = 0; i < buffer.size(); ++i) {
+                buffer[i] ^= key[i % key.length()];
+            }
+
+            fs::path newPath = filePath;
+            if (encrypt) {
+                newPath += ".encrypted";
+            } else {
+                string pStr = filePath.string();
+                if (pStr.size() > 10 && pStr.substr(pStr.size() - 10) == ".encrypted") {
+                    newPath = pStr.substr(0, pStr.size() - 10);
+                }
+            }
+
+            ofstream outFile(newPath, ios::binary);
+            outFile.write(buffer.data(), buffer.size());
+            outFile.close();
+
+            // Բնօրինակ ֆայլի ջնջում (Security requirement 2.2.3)
+            fs::remove(filePath);
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
+};
+
+// =========================================================
+// 2. USB Drive Detection (USB կրիչների հայտնաբերում)
+// =========================================================
+class USBDetector {
+public:
+    static vector<string> getUSBDrives() {
+        vector<string> drives;
+        char driveBuffer[256];
+        DWORD size = GetLogicalDriveStringsA(sizeof(driveBuffer), driveBuffer);
+
+        char* drive = driveBuffer;
+        while (*drive) {
+            if (GetDriveTypeA(drive) == DRIVE_REMOVABLE) {
+                drives.push_back(string(drive));
+            }
+            drive += strlen(drive) + 1;
+        }
+        return drives;
+    }
+};
+
+// =========================================================
+// 3. File Operations (Ֆայլային գործողություններ)
+// =========================================================
+class FileOperations {
+public:
+    static void listPath(const string& path) {
+        if (!fs::exists(path)) {
+            cout << "[Սխալ] Ուղին գոյություն չունի:" << endl;
+            return;
+        }
+        for (const auto& entry : fs::directory_iterator(path)) {
+            cout << (entry.is_directory() ? "[DIR] " : "      ") 
+                 << entry.path().filename().string() << endl;
+        }
+    }
+
+    static void createMetadata(const string& drivePath, int count) {
+        ofstream cfg(drivePath + "usb_protection.meta");
+        cfg << "Status: Protected" << endl;
+        cfg << "FileCount: " << count << endl;
+        cfg << "Method: XOR-Block" << endl;
+        cfg.close();
+    }
+};
+
+// =========================================================
+// 4. User Interface / Main Command Processor
+// =========================================================
+void printHelp() {
+    cout << "\nProtectUSB Հրամաններ:" << endl;
+    cout << "  scan             - Հայտնաբերել USB կրիչները" << endl;
+    cout << "  list [ուղի]      - Ցուցադրել ֆայլերի ցուցակը" << endl;
+    cout << "  protect [ուղի]   - Պաշտպանել (գաղտնագրել) ամբողջ USB-ն" << endl;
+    cout << "  unprotect [ուղի] - Վերականգնել (վերծանել) ամբողջ USB-ն" << endl;
+    cout << "  encrypt [ֆայլ]   - Գաղտնագրել մեկ ֆայլ" << endl;
+    cout << "  decrypt [ֆայլ]   - Վերծանել մեկ ֆայլ" << endl;
+}
+
+int main(int argc, char* argv[]) {
+    if (argc < 2) {
+        printHelp();
+        return 0;
+    }
+
+    string command = argv[1];
+
+    if (command == "scan") {
+        vector<string> drives = USBDetector::getUSBDrives();
+        cout << "Հայտնաբերված USB կրիչներ:" << endl;
+        for (size_t i = 0; i < drives.size(); ++i) {
+            cout << i + 1 << ". " << drives[i] << endl;
+        }
+    } 
+    else if (command == "list") {
+        string path = (argc > 2) ? argv[2] : ".";
+        FileOperations::listPath(path);
+    }
+    else if (command == "protect" || command == "unprotect") {
+        if (argc < 3) { cout << "[!] Նշեք USB-ի ուղին:" << endl; return 1; }
+        string drivePath = argv[2];
+        string key;
+        cout << "Մուտքագրեք գաղտնագրման բանալի: "; cin >> key;
+
+        bool isEncrypt = (command == "protect");
+        int count = 0;
+
+        for (const auto& entry : fs::recursive_directory_iterator(drivePath)) {
+            if (fs::is_regular_file(entry)) {
+                string ext = entry.path().extension().string();
+                if (isEncrypt && ext != ".encrypted" && entry.path().filename() != "usb_protection.meta") {
+                    if (EncryptionEngine::processFile(entry.path(), key, true)) count++;
+                } else if (!isEncrypt && ext == ".encrypted") {
+                    if (EncryptionEngine::processFile(entry.path(), key, false)) count++;
+                }
+            }
+        }
+        
+        if (isEncrypt) FileOperations::createMetadata(drivePath, count);
+        cout << "\nԳործողությունն ավարտվեց: Մշակվեց " << count << " ֆայլ:" << endl;
+    }
+    else if (command == "encrypt" || command == "decrypt") {
+        if (argc < 3) { cout << "[!] Նշեք ֆայլի անունը:" << endl; return 1; }
+        string key;
+        cout << "Մուտքագրեք բանալի: "; cin >> key;
+        if (EncryptionEngine::processFile(argv[2], key, (command == "encrypt"))) {
+            cout << "[+] Հաջողությամբ մշակվեց:" << endl;
+        } else {
+            cout << "[-] Սխալ ֆայլի մշակման ժամանակ:" << endl;
+        }
+    }
+    else {
+        printHelp();
+    }
+
+    return 0;
+}

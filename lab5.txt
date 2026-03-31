@@ -1,0 +1,104 @@
+#include <iostream>
+#include <fstream>
+#include <string>
+#include <filesystem>
+#include <windows.h>
+#include <intrin.h>
+#include <ctime>
+
+using namespace std;
+namespace fs = std::filesystem;
+
+class HardwareManager {
+public:
+    static string getCPUID() {
+        int cpuInfo[4];
+        __cpuid(cpuInfo, 1);
+        char buf[33];
+        sprintf_s(buf, "%08X%08X", cpuInfo[3], cpuInfo[0]);
+        return string(buf);
+    }
+
+    // Լրամշակված հեշ՝ ավելացնելով ժամկետ (Expiry Date)
+    static string generateLicenseKey(const string& hwid, int daysValid = 30) {
+        time_t now = time(0);
+        time_t expiry = now + (daysValid * 24 * 60 * 60);
+        
+        string raw = hwid + to_string(expiry);
+        for (char &c : raw) c ^= 0x5A; // XOR որպես պարզ գաղտնագրում
+        
+        return raw; // Սա կլինի մեր լիցենզիայի ֆայլի բովանդակությունը
+    }
+};
+
+class LicenseManager {
+    const string licenseFile = "license.lic";
+public:
+    // Ստուգում է լիցենզիայի վավերականությունը և ժամկետը
+    bool checkLicense() {
+        if (!fs::exists(licenseFile)) return false;
+
+        ifstream in(licenseFile);
+        string storedKey;
+        getline(in, storedKey);
+        in.close();
+
+        // Վերծանում ենք (XOR-ը հետ ենք անում)
+        for (char &c : storedKey) c ^= 0x5A;
+
+        string currentHWID = HardwareManager::getCPUID();
+        
+        // Ստուգում ենք՝ արդյոք HWID-ն համընկնում է
+        if (storedKey.find(currentHWID) != 0) return false;
+
+        // Ստուգում ենք ժամկետը
+        string dateStr = storedKey.substr(currentHWID.length());
+        time_t expiryDate = stoll(dateStr);
+        time_t now = time(0);
+
+        if (now > expiryDate) {
+            cout << "[!] License expired!" << endl;
+            return false;
+        }
+        return true;
+    }
+
+    void saveLicense(const string& key) {
+        ofstream out(licenseFile);
+        out << key;
+        out.close();
+        cout << "[+] License activated and saved!" << endl;
+    }
+};
+
+int main(int argc, char* argv[]) {
+    LicenseManager lm;
+    string hwid = HardwareManager::getCPUID();
+
+    cout << "=== ProtectUSB Licensing System ===" << endl;
+    cout << "Machine ID: " << hwid << endl;
+
+    if (argc < 2) {
+        cout << "Commands: activate, protect [drive]" << endl;
+        return 0;
+    }
+
+    string command = argv[1];
+
+    if (command == "activate") {
+        // Իրականում սա պետք է գեներացվի սերվերի կողմից
+        string newKey = HardwareManager::generateLicenseKey(hwid, 30); 
+        lm.saveLicense(newKey);
+    } 
+    else if (command == "protect") {
+        if (!lm.checkLicense()) {
+            cout << "Error: No valid license found. Please activate first." << endl;
+            return 1;
+        }
+        
+        cout << "Access Granted! Protecting drive..." << endl;
+        // Այստեղ կանչվում է ձեր EncryptionEngine-ը
+    }
+
+    return 0;
+}

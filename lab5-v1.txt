@@ -1,0 +1,153 @@
+#include <iostream>
+#include <fstream>
+#include <string>
+#include <vector>
+#include <filesystem>
+#include <windows.h> // USB հայտնաբերման համար
+#include <algorithm>
+
+using namespace std;
+namespace fs = std::filesystem;
+
+// --- Գաղտնագրման Շարժիչ (Encryption Engine) ---
+class EncryptionEngine {
+public:
+    // Բլոկային գաղտնագրում (Block Mode - ըստ պահանջի)
+    static void transform(string filePath, string key, bool encryptMode) {
+        ifstream inFile(filePath, ios::binary);
+        if (!inFile) {
+            cerr << "[Սխալ] Չհաջողվեց բացել ֆայլը: " << filePath << endl;
+            return;
+        }
+
+        // Կարդում ենք ամբողջ բովանդակությունը
+        vector<char> buffer((istreambuf_iterator<char>(inFile)), istreambuf_iterator<char>());
+        inFile.close();
+
+        // Գաղտնագրման ալգորիթմ (Advanced Block XOR)
+        for (size_t i = 0; i < buffer.size(); ++i) {
+            buffer[i] ^= key[i % key.length()];
+            if (encryptMode) buffer[i] += 5; // Լրացուցիչ շերտ
+            else buffer[i] -= 5;
+        }
+
+        // Որոշում ենք նոր ֆայլի անունը
+        string newPath = filePath;
+        if (encryptMode) {
+            newPath += ".encrypted";
+        } else {
+            if (newPath.find(".encrypted") != string::npos)
+                newPath.erase(newPath.find(".encrypted"));
+        }
+
+        ofstream outFile(newPath, ios::binary);
+        outFile.write(buffer.data(), buffer.size());
+        outFile.close();
+
+        // Բնօրինակ ֆայլի ջնջում (ըստ պահանջի)
+        fs::remove(filePath);
+        cout << (encryptMode ? "[Protected] " : "[Restored] ") << fs::path(newPath).filename() << endl;
+    }
+};
+
+// --- USB Կառավարիչ (USB Manager) ---
+class USBManager {
+public:
+    // 1. Scan հրաման
+    static void scanDrives() {
+        cout << "Հայտնաբերված USB կրիչներ:" << endl;
+        char drives[256];
+        GetLogicalDriveStringsA(sizeof(drives), drives);
+        char* drive = drives;
+        int count = 0;
+        while (*drive) {
+            if (GetDriveTypeA(drive) == DRIVE_REMOVABLE) {
+                cout << ++count << ". " << drive << endl;
+            }
+            drive += strlen(drive) + 1;
+        }
+        if (count == 0) cout << "USB կրիչներ չեն գտնվել:" << endl;
+    }
+
+    // 2. List հրաման
+    static void listFiles(string path) {
+        cout << "Ֆայլերի ցուցակ (" << path << "):" << endl;
+        if (!fs::exists(path)) return;
+        for (const auto& entry : fs::directory_iterator(path)) {
+            cout << (entry.is_directory() ? "[DIR] " : "      ") << entry.path().filename().string() << endl;
+        }
+    }
+
+    // 3. Protect/Unprotect հրամաններ (Ամբողջ կրիչի համար)
+    static void processDrive(string drivePath, string key, bool encrypt) {
+        cout << (encrypt ? "Պաշտպանում եմ " : "Վերականգնում եմ ") << drivePath << "..." << endl;
+        int fileCount = 0;
+        
+        for (const auto& entry : fs::recursive_directory_iterator(drivePath)) {
+            if (fs::is_regular_file(entry)) {
+                string p = entry.path().string();
+                
+                if (encrypt && p.find(".encrypted") == string::npos) {
+                    EncryptionEngine::transform(p, key, true);
+                    fileCount++;
+                }
+                else if (!encrypt && p.find(".encrypted") != string::npos) {
+                    EncryptionEngine::transform(p, key, false);
+                    fileCount++;
+                }
+            }
+        }
+
+        // Կոնֆիգուրացիոն ֆայլի ստեղծում (ըստ պահանջի)
+        string configFile = drivePath + ".usb_metadata";
+        if (encrypt) {
+            ofstream cfg(configFile);
+            cfg << "Status: Protected\nFiles: " << fileCount;
+            cfg.close();
+        } else {
+            fs::remove(configFile);
+        }
+
+        cout << "Գործողությունն ավարտվեց: Մշակվեց " << fileCount << " ֆայլ:" << endl;
+    }
+};
+
+// --- Մուտքի կետ (Main) ---
+int main(int argc, char* argv[]) {
+    if (argc < 2) {
+        cout << "ProtectUSB Հրամաններ:\n";
+        cout << "  scan            - Գտնել USB կրիչները\n";
+        cout << "  list [path]     - Ցուցադրել ֆայլերը\n";
+        cout << "  protect [path]  - Գաղտնագրել ամբողջը\n";
+        cout << "  unprotect [path]- Վերծանել ամբողջը\n";
+        cout << "  encrypt [file]  - Գաղտնագրել մեկ ֆայլ\n";
+        cout << "  decrypt [file]  - Վերծանել մեկ ֆայլ\n";
+        return 0;
+    }
+
+    string cmd = argv[1];
+
+    if (cmd == "scan") {
+        USBManager::scanDrives();
+    } 
+    else if (cmd == "list") {
+        if (argc < 3) cout << "Նշեք ուղին:"; else USBManager::listFiles(argv[2]);
+    }
+    else if (cmd == "protect" || cmd == "unprotect") {
+        if (argc < 3) { cout << "Նշեք ուղին:"; return 1; }
+        string key;
+        cout << "Մուտքագրեք բանալին: "; cin >> key;
+        USBManager::processDrive(argv[2], key, (cmd == "protect"));
+    }
+    else if (cmd == "encrypt" || cmd == "decrypt") {
+        if (argc < 3) { cout << "Նշեք ֆայլը:"; return 1; }
+        string key;
+        cout << "Մուտքագրեք բանալին: "; cin >> key;
+        EncryptionEngine::transform(argv[2], key, (cmd == "encrypt"));
+    }
+    else {
+        cout << "Անհայտ հրաման:" << endl;
+    }
+
+    return 0;
+}
