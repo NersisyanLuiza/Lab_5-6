@@ -1,103 +1,169 @@
 #include <iostream>
 #include <fstream>
 #include <string>
+#include <vector>
 #include <filesystem>
+#include <algorithm>
+
+#ifdef _WIN32
 #include <windows.h>
-#include <intrin.h>
-#include <ctime>
+#endif
 
 using namespace std;
 namespace fs = std::filesystem;
 
-class HardwareManager {
+// --- Encryption Engine (Գաղտնագրման շարժիչ) ---
+class EncryptionEngine {
 public:
-    static string getCPUID() {
-        int cpuInfo[4];
-        __cpuid(cpuInfo, 1);
-        char buf[33];
-        sprintf_s(buf, "%08X%08X", cpuInfo[3], cpuInfo[0]);
-        return string(buf);
-    }
-
-    // Լրամշակված հեշ՝ ավելացնելով ժամկետ (Expiry Date)
-    static string generateLicenseKey(const string& hwid, int daysValid = 30) {
-        time_t now = time(0);
-        time_t expiry = now + (daysValid * 24 * 60 * 60);
-        
-        string raw = hwid + to_string(expiry);
-        for (char &c : raw) c ^= 0x5A; // XOR որպես պարզ գաղտնագրում
-        
-        return raw; // Սա կլինի մեր լիցենզիայի ֆայլի բովանդակությունը
-    }
-};
-
-class LicenseManager {
-    const string licenseFile = "license.lic";
-public:
-    // Ստուգում է լիցենզիայի վավերականությունը և ժամկետը
-    bool checkLicense() {
-        if (!fs::exists(licenseFile)) return false;
-
-        ifstream in(licenseFile);
-        string storedKey;
-        getline(in, storedKey);
-        in.close();
-
-        // Վերծանում ենք (XOR-ը հետ ենք անում)
-        for (char &c : storedKey) c ^= 0x5A;
-
-        string currentHWID = HardwareManager::getCPUID();
-        
-        // Ստուգում ենք՝ արդյոք HWID-ն համընկնում է
-        if (storedKey.find(currentHWID) != 0) return false;
-
-        // Ստուգում ենք ժամկետը
-        string dateStr = storedKey.substr(currentHWID.length());
-        time_t expiryDate = stoll(dateStr);
-        time_t now = time(0);
-
-        if (now > expiryDate) {
-            cout << "[!] License expired!" << endl;
-            return false;
+    // XOR գաղտնագրման ֆունկցիա
+    static void xor_process(vector<char>& data, const string& key) {
+        for (size_t i = 0; i < data.size(); ++i) {
+            data[i] ^= key[i % key.length()];
         }
+    }
+
+    static bool process_file(const fs::path& filePath, const string& key, bool encrypt) {
+        // Ստուգում ենք արդյոք ֆայլը արդեն գաղտնագրված է կամ հակառակը
+        if (encrypt && filePath.extension() == ".encrypted") return false;
+        if (!encrypt && filePath.extension() != ".encrypted") return false;
+
+        // 1. Կարդալ ֆայլը
+        ifstream inFile(filePath, ios::binary);
+        if (!inFile) return false;
+        vector<char> data((istreambuf_iterator<char>(inFile)), istreambuf_iterator<char>());
+        inFile.close();
+
+        // 2. Գաղտնագրել/Վերծանել
+        xor_process(data, key);
+
+        // 3. Որոշել նոր ֆայլի անունը
+        fs::path outPath = filePath;
+        if (encrypt) {
+            outPath += ".encrypted";
+        }
+        else {
+            string p = outPath.string();
+            outPath = p.substr(0, p.find_last_of('.'));
+        }
+
+        // 4. Պահպանել նոր ֆայլը
+        ofstream outFile(outPath, ios::binary);
+        if (!outFile) return false;
+        outFile.write(data.data(), data.size());
+        outFile.close();
+
+        // 5. Ջնջել բնօրինակը (ըստ պահանջի)
+        fs::remove(filePath);
         return true;
     }
-
-    void saveLicense(const string& key) {
-        ofstream out(licenseFile);
-        out << key;
-        out.close();
-        cout << "[+] License activated and saved!" << endl;
-    }
 };
 
-int main(int argc, char* argv[]) {
-    LicenseManager lm;
-    string hwid = HardwareManager::getCPUID();
+// --- USB Drive Detection (USB կրիչների հայտնաբերում) ---
+void scanDrives() {
+    cout << "Հայտնաբերված USB կրիչներ:" << endl;
+#ifdef _WIN32
+    char driveBuffer[256];
+    GetLogicalDriveStringsA(sizeof(driveBuffer), driveBuffer);
+    char* drive = driveBuffer;
+    int count = 0;
+    while (*drive) {
+        if (GetDriveTypeA(drive) == DRIVE_REMOVABLE) {
+            cout << ++count << ". " << drive << endl;
+        }
+        drive += strlen(drive) + 1;
+    }
+    if (count == 0) cout << "Ոչ մի USB կրիչ չի հայտնաբերվել:" << endl;
+#else
+    cout << "Այս պլատֆորմի համար սկանավորումը դեռ հասանելի չէ (TODO):" << endl;
+#endif
+}
 
-    cout << "=== ProtectUSB Licensing System ===" << endl;
-    cout << "Machine ID: " << hwid << endl;
+// --- File Operations (Ֆայլային գործողություններ) ---
+void listFiles(const string& path) {
+    if (!fs::exists(path)) {
+        cout << "Ուղին գոյություն չունի:" << endl;
+        return;
+    }
+    cout << "Ֆայլերի ցուցակ (" << path << "):" << endl;
+    for (const auto& entry : fs::directory_iterator(path)) {
+        cout << (entry.is_directory() ? "[DIR]  " : "[FILE] ") << entry.path().filename().string() << endl;
+    }
+}
+
+// --- Հիմնական ինտերֆեյս ---
+int main(int argc, char* argv[]) {
+    SetConsoleOutputCP(65001);
+    SetConsoleCP(65001);
+    setlocale(LC_ALL, "Armenian");
 
     if (argc < 2) {
-        cout << "Commands: activate, protect [drive]" << endl;
+        cout << "Օգտագործում:" << endl;
+        cout << "  protectusb scan" << endl;
+        cout << "  protectusb list [ուղի]" << endl;
+        cout << "  protectusb protect [ուղի]" << endl;
+        cout << "  protectusb unprotect [ուղի]" << endl;
+        cout << "  protectusb encrypt [ֆայլ]" << endl;
+        cout << "  protectusb decrypt [ֆայլ]" << endl;
         return 0;
     }
 
     string command = argv[1];
 
-    if (command == "activate") {
-        // Իրականում սա պետք է գեներացվի սերվերի կողմից
-        string newKey = HardwareManager::generateLicenseKey(hwid, 30); 
-        lm.saveLicense(newKey);
-    } 
-    else if (command == "protect") {
-        if (!lm.checkLicense()) {
-            cout << "Error: No valid license found. Please activate first." << endl;
+    if (command == "scan") {
+        scanDrives();
+    }
+    else if (command == "list" && argc > 2) {
+        listFiles(argv[2]);
+    }
+    else if (command == "encrypt" || command == "decrypt") {
+        if (argc < 3) {
+            cout << "Նշեք ֆայլի ուղին:" << endl;
             return 1;
         }
-        
-        cout << "Access Granted! Protecting drive..." << endl;
-        // Այստեղ կանչվում է ձեր EncryptionEngine-ը
+        string key;
+        cout << "Մուտքագրեք բանալին: ";
+        cin >> key;
+        if (EncryptionEngine::process_file(argv[2], key, (command == "encrypt"))) {
+            cout << "Գործողությունը հաջողվեց:" << endl;
+        }
+        else {
+            cout << "Սխալ ֆայլի մշակման ժամանակ:" << endl;
+        }
+    }
+    else if (command == "protect" || command == "unprotect") {
+        if (argc < 3) {
+            cout << "Նշեք ուղին:" << endl;
+            return 1;
+        }
+        string key;
+        cout << "Մուտքագրեք գաղտնագրման բանալի: ";
+        cin >> key;
+
+        string targetDir = argv[2];
+        bool isEncrypt = (command == "protect");
+        int count = 0;
+
+        cout << (isEncrypt ? "Պաշտպանում եմ..." : "Վերականգնում եմ...") << endl;
+        cout << "────────────────────────────────" << endl;
+
+        try {
+            for (const auto& entry : fs::recursive_directory_iterator(targetDir)) {
+                if (entry.is_regular_file()) {
+                    if (EncryptionEngine::process_file(entry.path(), key, isEncrypt)) {
+                        cout << "Մշակվեց: " << entry.path().filename() << endl;
+                        count++;
+                    }
+                }
+            }
+            cout << "────────────────────────────────" << endl;
+            cout << "Գործողությունն ավարտվեց: Մշակվեց " << count << " ֆայլ:" << endl;
+        }
+        catch (const exception& e) {
+            cout << "Սխալ: " << e.what() << endl;
+        }
+    }
+    else {
+        cout << "Անհայտ հրաման:" << endl;
     }
 
     return 0;
